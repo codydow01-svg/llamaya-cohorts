@@ -86,9 +86,10 @@ def compute_cohorts(df):
             return 1 if any(lo <= d <= hi for d in dates) else 0
         cohorts[col_name] = cohorts.apply(flag, axis=1)
 
-    # Cohort week = Monday of the week of first purchase
-    cohorts["cohort_week_start"] = cohorts["cohort_date"] - pd.to_timedelta(
-        cohorts["cohort_date"].dt.dayofweek, unit="D"
+    # Normalize to midnight FIRST, then compute Monday of the week
+    cohort_date_day = cohorts["cohort_date"].dt.normalize()
+    cohorts["cohort_week_start"] = cohort_date_day - pd.to_timedelta(
+        cohort_date_day.dt.dayofweek, unit="D"
     )
 
     today = pd.Timestamp.now().normalize()
@@ -101,7 +102,6 @@ def compute_cohorts(df):
             "customers": total,
         }
         for col_name, days_from, days_to in WINDOWS:
-            # Window is "closed" only when even Monday customers have passed days_to
             window_closed = (today >= week_start + pd.Timedelta(days=days_to))
             if window_closed:
                 count = int(group[col_name].sum())
@@ -137,7 +137,7 @@ def write_cohorts(client, summary):
     rows = summary[data_cols].values.tolist()
     sheet.clear()
     sheet.update([headers] + rows, value_input_option="USER_ENTERED")
-    print(f"  Written {len(rows)} rows")
+    print(f"  Written {len(rows)} cohort weeks")
     print(f"  Updated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}")
 
 def main():
