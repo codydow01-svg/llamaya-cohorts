@@ -1,24 +1,23 @@
 #!/usr/bin/env python3
 """
 Llamaya Cohort Analysis
-Reads orders from Google Sheets, computes cohort recharge metrics,
-writes results to Cohort_Llamaya sheet daily.
+Reads orders directly from the orders spreadsheet,
+computes cohort recharge metrics, writes results to Cohort_Llamaya sheet daily.
 """
 
 import os
 import json
-import time
 import gspread
 import pandas as pd
 from datetime import datetime
 from google.oauth2.service_account import Credentials
 
-# Orders data is read via IMPORTRANGE mirror in the cohort spreadsheet (Лист1).
-# This avoids needing direct access to the read-only orders spreadsheet.
-# Лист1 formula: =IMPORTRANGE("159XaSuCaBBb-9d_J93ujHgA5DpintxW37QRdeOQCOtE","orders!A1:T35000")
-ORDERS_SPREADSHEET_ID = "1sM00OKAvedi4GlNav3wtN-efEBl2fxUHUhebkr37xcA"  # cohort spreadsheet (has mirror)
+# Direct access to orders spreadsheet (service account needs viewer access)
+ORDERS_SPREADSHEET_ID = "159XaSuCaBBb-9d_J93ujHgA5DpintxW37QRdeOQCOtE"
+ORDERS_SHEET_NAME     = "orders"
+
+# Cohort results go here
 COHORT_SPREADSHEET_ID = "1sM00OKAvedi4GlNav3wtN-efEBl2fxUHUhebkr37xcA"
-ORDERS_SHEET_NAME     = "Лист1"   # IMPORTRANGE tab: orders!A1:T35000
 COHORT_SHEET_NAME     = "Cohort_Llamaya"
 
 SCOPES = [
@@ -41,26 +40,15 @@ def get_client():
     return gspread.authorize(creds)
 
 
-def read_orders(client, max_retries=8):
-    """Read orders with retry on 503 (IMPORTRANGE may need time to load)."""
+def read_orders(client):
     print("Reading orders...")
     sheet = client.open_by_key(ORDERS_SPREADSHEET_ID).worksheet(ORDERS_SHEET_NAME)
-    for attempt in range(max_retries):
-        try:
-            rows = sheet.get_all_values()
-            if len(rows) < 2:
-                raise ValueError("Orders sheet is empty or IMPORTRANGE not loaded yet")
-            df = pd.DataFrame(rows[1:], columns=rows[0])
-            print(f"  Total rows: {len(df)}")
-            return df
-        except (gspread.exceptions.APIError, ValueError) as e:
-            err = str(e)
-            if attempt < max_retries - 1 and ('503' in err or 'empty' in err or 'unavailable' in err.lower()):
-                wait = 30 * (attempt + 1)
-                print(f"  Attempt {attempt + 1} failed ({err[:80]}), retrying in {wait}s...")
-                time.sleep(wait)
-            else:
-                raise
+    rows = sheet.get_all_values()
+    if len(rows) < 2:
+        raise ValueError("Orders sheet is empty")
+    df = pd.DataFrame(rows[1:], columns=rows[0])
+    print(f"  Total rows: {len(df)}")
+    return df
 
 
 def compute_cohorts(df):
