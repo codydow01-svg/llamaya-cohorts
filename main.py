@@ -61,8 +61,7 @@ def compute_cohorts(df):
 
     mask = (
         (df[col_operator].str.strip() == "Llamaya") &
-        (df[col_stripe].str.strip() != "") &
-        (df[col_stripe].notna())
+        df[col_stripe].notna() & (df[col_stripe] != "")
     )
     llamaya = df[mask].copy()
     print(f"  Llamaya rows with stripe_id: {len(llamaya)}")
