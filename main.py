@@ -7,6 +7,7 @@ writes results to Cohort_Llamaya sheet daily.
 
 import os
 import json
+import time
 import gspread
 import pandas as pd
 from datetime import datetime
@@ -40,15 +41,26 @@ def get_client():
     return gspread.authorize(creds)
 
 
-def read_orders(client):
+def read_orders(client, max_retries=8):
+    """Read orders with retry on 503 (IMPORTRANGE may need time to load)."""
     print("Reading orders...")
     sheet = client.open_by_key(ORDERS_SPREADSHEET_ID).worksheet(ORDERS_SHEET_NAME)
-    rows = sheet.get_all_values()
-    if len(rows) < 2:
-        raise ValueError("Orders sheet is empty")
-    df = pd.DataFrame(rows[1:], columns=rows[0])
-    print(f"  Total rows: {len(df)}")
-    return df
+    for attempt in range(max_retries):
+        try:
+            rows = sheet.get_all_values()
+            if len(rows) < 2:
+                raise ValueError("Orders sheet is empty or IMPORTRANGE not loaded yet")
+            df = pd.DataFrame(rows[1:], columns=rows[0])
+            print(f"  Total rows: {len(df)}")
+            return df
+        except (gspread.exceptions.APIError, ValueError) as e:
+            err = str(e)
+            if attempt < max_retries - 1 and ('503' in err or 'empty' in err or 'unavailable' in err.lower()):
+                wait = 30 * (attempt + 1)
+                print(f"  Attempt {attempt + 1} failed ({err[:80]}), retrying in {wait}s...")
+                time.sleep(wait)
+            else:
+                raise
 
 
 def compute_cohorts(df):
