@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """
 Llamaya Cohort Analysis
-Reads orders directly from the orders spreadsheet,
-computes cohort recharge metrics in 3x28-day windows,
-writes summary + detail to Cohort_Llamaya sheet daily.
+Weekly cohorts, 3x28-day recharge windows, 'рано' when window not yet closed.
 """
 
 import os
@@ -23,11 +21,10 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive.readonly",
 ]
 
-# Three 28-day windows after first purchase
 WINDOWS = [
-    ("recharged_1",  1,  28),
-    ("recharged_2", 29,  56),
-    ("recharged_3", 57,  84),
+    ("p1",  1,  28),
+    ("p2", 29,  56),
+    ("p3", 57,  84),
 ]
 
 def get_client():
@@ -69,7 +66,6 @@ def compute_cohorts(df):
     recharged = llamaya[llamaya[col_recharge].str.strip() == "yes"].copy()
     print(f"  First purchases: {len(first)}, Recharges: {len(recharged)}")
 
-    # Per-user cohort date (earliest first purchase)
     cohorts = (
         first.groupby(col_email)[col_date]
         .min()
@@ -90,62 +86,65 @@ def compute_cohorts(df):
             return 1 if any(lo <= d <= hi for d in dates) else 0
         cohorts[col_name] = cohorts.apply(flag, axis=1)
 
-    cohorts["cohort_month"] = cohorts["cohort_date"].dt.to_period("M")
-
-    # Summary: one row per cohort month
-    summary = (
-        cohorts.groupby("cohort_month")
-        .agg(
-            total=("email", "count"),
-            recharged_1=("recharged_1", "sum"),
-            recharged_2=("recharged_2", "sum"),
-            recharged_3=("recharged_3", "sum"),
-        )
-        .reset_index()
-        .sort_values("cohort_month")
+    # Cohort week = Monday of the week of first purchase
+    cohorts["cohort_week_start"] = cohorts["cohort_date"] - pd.to_timedelta(
+        cohorts["cohort_date"].dt.dayofweek, unit="D"
     )
-    summary["cohort_month"] = summary["cohort_month"].astype(str)
-    summary["rate_1"] = (summary["recharged_1"] / summary["total"] * 100).round(1).astype(str) + "%"
-    summary["rate_2"] = (summary["recharged_2"] / summary["total"] * 100).round(1).astype(str) + "%"
-    summary["rate_3"] = (summary["recharged_3"] / summary["total"] * 100).round(1).astype(str) + "%"
 
-    cohorts["cohort_date"]  = cohorts["cohort_date"].dt.strftime("%d.%m.%Y")
-    cohorts["cohort_month"] = cohorts["cohort_month"].astype(str)
+    today = pd.Timestamp.now().normalize()
 
-    return summary, cohorts
+    records = []
+    for week_start, group in cohorts.groupby("cohort_week_start"):
+        total = len(group)
+        row = {
+            "cohort_week": week_start.strftime("%d.%m.%Y"),
+            "customers": total,
+        }
+        for col_name, days_from, days_to in WINDOWS:
+            # Window is "closed" only when even Monday customers have passed days_to
+            window_closed = (today >= week_start + pd.Timedelta(days=days_to))
+            if window_closed:
+                count = int(group[col_name].sum())
+                row[f"{col_name}_count"] = count
+                row[f"{col_name}_pct"]   = f"{count / total * 100:.1f}%"
+            else:
+                row[f"{col_name}_count"] = "рано"
+                row[f"{col_name}_pct"]   = ""
+        records.append(row)
 
-def write_cohorts(client, summary, cohorts):
+    summary = pd.DataFrame(records)
+    print(f"  Cohort weeks: {len(summary)}")
+    return summary
+
+def write_cohorts(client, summary):
     print("\nWriting to Cohort_Llamaya...")
     spreadsheet = client.open_by_key(COHORT_SPREADSHEET_ID)
     try:
         sheet = spreadsheet.worksheet(COHORT_SHEET_NAME)
     except gspread.WorksheetNotFound:
-        sheet = spreadsheet.add_worksheet(COHORT_SHEET_NAME, rows=10000, cols=10)
+        sheet = spreadsheet.add_worksheet(COHORT_SHEET_NAME, rows=500, cols=10)
         print("  Created new sheet Cohort_Llamaya")
 
-    summary_headers = ["cohort_month", "total", "recharged_1", "recharged_2", "recharged_3", "rate_1", "rate_2", "rate_3"]
-    detail_headers  = ["email", "cohort_date", "cohort_month", "recharged_1", "recharged_2", "recharged_3"]
+    headers = ["cohort_week", "customers",
+               "p1 (d1-28)", "p1 %",
+               "p2 (d29-56)", "p2 %",
+               "p3 (d57-84)", "p3 %"]
+    data_cols = ["cohort_week", "customers",
+                 "p1_count", "p1_pct",
+                 "p2_count", "p2_pct",
+                 "p3_count", "p3_pct"]
 
-    summary_rows = summary[summary_headers].values.tolist()
-    detail_rows  = cohorts[detail_headers].values.tolist()
-
-    all_rows = (
-        [summary_headers] + summary_rows +
-        [[]] +
-        [detail_headers] + detail_rows
-    )
-
+    rows = summary[data_cols].values.tolist()
     sheet.clear()
-    sheet.update(all_rows, value_input_option="USER_ENTERED")
-    print(f"  Summary: {len(summary_rows)} cohort months")
-    print(f"  Detail: {len(detail_rows)} users")
+    sheet.update([headers] + rows, value_input_option="USER_ENTERED")
+    print(f"  Written {len(rows)} rows")
     print(f"  Updated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}")
 
 def main():
     client = get_client()
     df = read_orders(client)
-    summary, cohorts = compute_cohorts(df)
-    write_cohorts(client, summary, cohorts)
+    summary = compute_cohorts(df)
+    write_cohorts(client, summary)
     print("\nDone!")
 
 if __name__ == "__main__":
