@@ -11,8 +11,8 @@ import pandas as pd
 from datetime import datetime
 from google.oauth2.service_account import Credentials
 
-ORDERS_SPREADSHEET_ID = "159XaSuCaBBb-9d_J93ujHgA5DpintxW37QRdeOQCOtE"
-ORDERS_SHEET_NAME     = "orders"
+ORDERS_SPREADSHEET_ID = "1eJau3HSsP_qYA7Sy2C9AF17uA47B3QlrnDmzDM59yrg"
+ORDERS_SHEET_NAME     = "Main_Sheet-2-1"
 COHORT_SPREADSHEET_ID = "1sM00OKAvedi4GlNav3wtN-efEBl2fxUHUhebkr37xcA"
 COHORT_SHEET_NAME     = "Cohort_Llamaya"
 
@@ -27,12 +27,23 @@ WINDOWS = [
     ("p3", 57,  84),
 ]
 
+# Column indices (0-based).
+COL_DATE     = 1   # B — order date
+COL_EMAIL    = 2   # C — customer email
+COL_STRIPE   = 8   # I — stripe_id
+COL_RECHARGE = 25  # Z — recharge status
+COL_OPERATOR = 9   # J — operator
+
+
 def get_client():
     creds_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
     if not creds_json:
         raise ValueError("GOOGLE_SERVICE_ACCOUNT_JSON environment variable not set")
     creds = Credentials.from_service_account_info(json.loads(creds_json), scopes=SCOPES)
-    return gspread.authorize(creds)
+    client = gspread.authorize(creds)
+    print(f"  Service account: {creds.service_account_email}")
+    return client
+
 
 def read_orders(client):
     print("Reading orders...")
@@ -40,17 +51,33 @@ def read_orders(client):
     rows = sheet.get_all_values()
     if len(rows) < 2:
         raise ValueError("Orders sheet is empty")
-    df = pd.DataFrame(rows[1:], columns=rows[0])
-    print(f"  Total rows: {len(df)}")
+
+    headers = rows[0]
+    print(f"  Total columns: {len(headers)}")
+    print("  Headers (index: name):")
+    for i, h in enumerate(headers):
+        if h:
+            print(f"    {i}: {h}")
+
+    print(f"\n  Key columns used:")
+    print(f"    COL_DATE     [{COL_DATE}]  = '{headers[COL_DATE] if COL_DATE < len(headers) else 'OUT OF RANGE'}'")
+    print(f"    COL_EMAIL    [{COL_EMAIL}]  = '{headers[COL_EMAIL] if COL_EMAIL < len(headers) else 'OUT OF RANGE'}'")
+    print(f"    COL_STRIPE   [{COL_STRIPE}]  = '{headers[COL_STRIPE] if COL_STRIPE < len(headers) else 'OUT OF RANGE'}'")
+    print(f"    COL_RECHARGE [{COL_RECHARGE}] = '{headers[COL_RECHARGE] if COL_RECHARGE < len(headers) else 'OUT OF RANGE'}'")
+    print(f"    COL_OPERATOR [{COL_OPERATOR}]  = '{headers[COL_OPERATOR] if COL_OPERATOR < len(headers) else 'OUT OF RANGE'}'")
+
+    df = pd.DataFrame(rows[1:], columns=headers)
+    print(f"\n  Total rows: {len(df)}")
     return df
+
 
 def compute_cohorts(df):
     cols = df.columns
-    col_date     = cols[1]
-    col_email    = cols[2]
-    col_stripe   = cols[8]
-    col_recharge = cols[14]
-    col_operator = cols[19]
+    col_date     = cols[COL_DATE]
+    col_email    = cols[COL_EMAIL]
+    col_stripe   = cols[COL_STRIPE]
+    col_recharge = cols[COL_RECHARGE]
+    col_operator = cols[COL_OPERATOR]
 
     mask = (
         (df[col_operator].str.strip() == "Llamaya") &
@@ -115,6 +142,7 @@ def compute_cohorts(df):
     print(f"  Cohort weeks: {len(summary)}")
     return summary
 
+
 def apply_formatting(spreadsheet, sheet, num_rows):
     sid = sheet.id
     end_row = num_rows + 1
@@ -142,6 +170,7 @@ def apply_formatting(spreadsheet, sheet, num_rows):
     spreadsheet.batch_update({"requests": requests})
     print("  Formatting applied")
 
+
 def write_cohorts(client, summary):
     print("\nWriting to Cohort_Llamaya...")
     spreadsheet = client.open_by_key(COHORT_SPREADSHEET_ID)
@@ -163,12 +192,14 @@ def write_cohorts(client, summary):
     print(f"  Written {len(rows)} cohort weeks")
     print(f"  Updated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}")
 
+
 def main():
     client = get_client()
     df = read_orders(client)
     summary = compute_cohorts(df)
     write_cohorts(client, summary)
     print("\nDone!")
+
 
 if __name__ == "__main__":
     main()
