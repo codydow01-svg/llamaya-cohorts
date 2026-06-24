@@ -113,7 +113,7 @@ def compute_cohorts(df):
     for week_start, group in cohorts.groupby("cohort_week_start"):
         total = len(group)
         row = {
-            "cohort_week": f"{week_start.strftime("%-d %b")}-{(week_start + pd.Timedelta(days=6)).strftime("%-d %b %Y")}",
+            "cohort_week": week_start.strftime("%d.%m") + " - " + (week_start + pd.Timedelta(days=6)).strftime("%d.%m.%Y"),
             "customers":   total,
         }
         for col_name, days_from, days_to in WINDOWS:
