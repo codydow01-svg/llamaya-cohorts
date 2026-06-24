@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 Llamaya Cohort Analysis
-Weekly cohorts, 3x28-day recharge windows, 'рано' when window not yet closed.
+Weekly cohorts, 3x28-day recharge windows.
+'рано' only when window has not started yet; otherwise shows live counts.
 """
 
 import os
@@ -86,10 +87,10 @@ def compute_cohorts(df):
             return 1 if any(lo <= d <= hi for d in dates) else 0
         cohorts[col_name] = cohorts.apply(flag, axis=1)
 
-    # Normalize to midnight FIRST, then compute Monday of the week
-    cohort_date_day = cohorts["cohort_date"].dt.normalize()
-    cohorts["cohort_week_start"] = cohort_date_day - pd.to_timedelta(
-        cohort_date_day.dt.dayofweek, unit="D"
+    # Normalize to midnight, then find Monday of that week
+    cohort_day = cohorts["cohort_date"].dt.normalize()
+    cohorts["cohort_week_start"] = cohort_day - pd.to_timedelta(
+        cohort_day.dt.dayofweek, unit="D"
     )
 
     today = pd.Timestamp.now().normalize()
@@ -99,17 +100,25 @@ def compute_cohorts(df):
         total = len(group)
         row = {
             "cohort_week": week_start.strftime("%d.%m.%Y"),
-            "customers": total,
+            "customers":   str(total),   # str to prevent Sheets date auto-format
         }
         for col_name, days_from, days_to in WINDOWS:
-            window_closed = (today >= week_start + pd.Timedelta(days=days_to))
-            if window_closed:
-                count = int(group[col_name].sum())
-                row[f"{col_name}_count"] = count
-                row[f"{col_name}_pct"]   = f"{count / total * 100:.1f}%"
-            else:
+            days_since = (today - week_start).days
+            if days_since < days_from:
+                # Window hasn't started for anyone yet
                 row[f"{col_name}_count"] = "рано"
                 row[f"{col_name}_pct"]   = ""
+            else:
+                count = int(group[col_name].sum())
+                pct   = f"{count / total * 100:.1f}%"
+                if days_since < days_to:
+                    # Window in progress — show live count with note
+                    row[f"{col_name}_count"] = str(count)
+                    row[f"{col_name}_pct"]   = pct + " *"
+                else:
+                    # Window fully closed — final numbers
+                    row[f"{col_name}_count"] = str(count)
+                    row[f"{col_name}_pct"]   = pct
         records.append(row)
 
     summary = pd.DataFrame(records)
@@ -125,6 +134,21 @@ def write_cohorts(client, summary):
         sheet = spreadsheet.add_worksheet(COHORT_SHEET_NAME, rows=500, cols=10)
         print("  Created new sheet Cohort_Llamaya")
 
+    # Clear values then reset all cell formatting (removes leftover date formats)
+    sheet.clear()
+    spreadsheet.batch_update({"requests": [{
+        "repeatCell": {
+            "range": {
+                "sheetId": sheet.id,
+                "startRowIndex": 0,
+                "startColumnIndex": 0,
+                "endColumnIndex": 8
+            },
+            "cell": {"userEnteredFormat": {}},
+            "fields": "userEnteredFormat"
+        }
+    }]})
+
     headers = ["cohort_week", "customers",
                "p1 (d1-28)", "p1 %",
                "p2 (d29-56)", "p2 %",
@@ -135,8 +159,8 @@ def write_cohorts(client, summary):
                  "p3_count", "p3_pct"]
 
     rows = summary[data_cols].values.tolist()
-    sheet.clear()
-    sheet.update([headers] + rows, value_input_option="USER_ENTERED")
+    # Use RAW so strings stay strings, no date auto-parsing
+    sheet.update([headers] + rows, value_input_option="RAW")
     print(f"  Written {len(rows)} cohort weeks")
     print(f"  Updated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}")
 
