@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
-Llamaya Cohort Analysis
-Weekly cohorts, 3x28-day recharge windows.
-'рано' only when window has not started yet; otherwise shows live counts.
+Llamaya Cohort Analysis - with Google Sheets formatting
+Weekly cohorts, 3x28-day recharge windows, green gradient on % columns.
 """
 
 import os
@@ -87,7 +86,6 @@ def compute_cohorts(df):
             return 1 if any(lo <= d <= hi for d in dates) else 0
         cohorts[col_name] = cohorts.apply(flag, axis=1)
 
-    # Normalize to midnight, then find Monday of that week
     cohort_day = cohorts["cohort_date"].dt.normalize()
     cohorts["cohort_week_start"] = cohort_day - pd.to_timedelta(
         cohort_day.dt.dayofweek, unit="D"
@@ -100,30 +98,49 @@ def compute_cohorts(df):
         total = len(group)
         row = {
             "cohort_week": week_start.strftime("%d.%m.%Y"),
-            "customers":   str(total),   # str to prevent Sheets date auto-format
+            "customers":   total,
         }
         for col_name, days_from, days_to in WINDOWS:
             days_since = (today - week_start).days
             if days_since < days_from:
-                # Window hasn't started for anyone yet
                 row[f"{col_name}_count"] = "рано"
                 row[f"{col_name}_pct"]   = ""
             else:
                 count = int(group[col_name].sum())
-                pct   = f"{count / total * 100:.1f}%"
-                if days_since < days_to:
-                    # Window in progress — show live count with note
-                    row[f"{col_name}_count"] = str(count)
-                    row[f"{col_name}_pct"]   = pct + " *"
-                else:
-                    # Window fully closed — final numbers
-                    row[f"{col_name}_count"] = str(count)
-                    row[f"{col_name}_pct"]   = pct
+                row[f"{col_name}_count"] = count
+                row[f"{col_name}_pct"]   = round(count / total * 100, 1)
         records.append(row)
 
     summary = pd.DataFrame(records)
     print(f"  Cohort weeks: {len(summary)}")
     return summary
+
+def apply_formatting(spreadsheet, sheet, num_rows):
+    sid = sheet.id
+    end_row = num_rows + 1
+    requests = []
+
+    requests.append({"repeatCell": {"range": {"sheetId": sid}, "cell": {"userEnteredFormat": {}}, "fields": "userEnteredFormat"}})
+
+    requests.append({"repeatCell": {"range": {"sheetId": sid, "startRowIndex": 0, "endRowIndex": 1, "startColumnIndex": 0, "endColumnIndex": 8}, "cell": {"userEnteredFormat": {"textFormat": {"bold": True, "fontSize": 10}, "backgroundColor": {"red": 0.851, "green": 0.851, "blue": 0.851}, "verticalAlignment": "MIDDLE"}}, "fields": "userEnteredFormat(textFormat,backgroundColor,verticalAlignment)"}})
+
+    requests.append({"updateSheetProperties": {"properties": {"sheetId": sid, "gridProperties": {"frozenRowCount": 1}}, "fields": "gridProperties.frozenRowCount"}})
+
+    requests.append({"repeatCell": {"range": {"sheetId": sid, "startRowIndex": 1, "endRowIndex": end_row, "startColumnIndex": 1, "endColumnIndex": 8}, "cell": {"userEnteredFormat": {"horizontalAlignment": "CENTER"}}, "fields": "userEnteredFormat.horizontalAlignment"}})
+
+    for col in [3, 5, 7]:
+        requests.append({"addConditionalFormatRule": {"rule": {"ranges": [{"sheetId": sid, "startRowIndex": 1, "endRowIndex": end_row, "startColumnIndex": col, "endColumnIndex": col + 1}], "gradientRule": {"minpoint": {"colorStyle": {"rgbColor": {"red": 1.0, "green": 1.0, "blue": 1.0}}, "type": "NUMBER", "value": "0"}, "maxpoint": {"colorStyle": {"rgbColor": {"red": 0.204, "green": 0.659, "blue": 0.325}}, "type": "NUMBER", "value": "30"}}}, "index": 0}})
+
+    for col_start, col_end in [(2, 4), (4, 6), (6, 8)]:
+        requests.append({"addConditionalFormatRule": {"rule": {"ranges": [{"sheetId": sid, "startRowIndex": 1, "endRowIndex": end_row, "startColumnIndex": col_start, "endColumnIndex": col_end}], "booleanRule": {"condition": {"type": "TEXT_EQ", "values": [{"userEnteredValue": "рано"}]}, "format": {"backgroundColor": {"red": 0.941, "green": 0.941, "blue": 0.941}, "textFormat": {"foregroundColor": {"red": 0.6, "green": 0.6, "blue": 0.6}, "italic": True}}}}, "index": 0}})
+
+    for i, w in enumerate([130, 90, 100, 80, 110, 80, 110, 80]):
+        requests.append({"updateDimensionProperties": {"range": {"sheetId": sid, "dimension": "COLUMNS", "startIndex": i, "endIndex": i + 1}, "properties": {"pixelSize": w}, "fields": "pixelSize"}})
+
+    requests.append({"updateDimensionProperties": {"range": {"sheetId": sid, "dimension": "ROWS", "startIndex": 0, "endIndex": 1}, "properties": {"pixelSize": 32}, "fields": "pixelSize"}})
+
+    spreadsheet.batch_update({"requests": requests})
+    print("  Formatting applied")
 
 def write_cohorts(client, summary):
     print("\nWriting to Cohort_Llamaya...")
@@ -134,33 +151,15 @@ def write_cohorts(client, summary):
         sheet = spreadsheet.add_worksheet(COHORT_SHEET_NAME, rows=500, cols=10)
         print("  Created new sheet Cohort_Llamaya")
 
-    # Clear values then reset all cell formatting (removes leftover date formats)
     sheet.clear()
-    spreadsheet.batch_update({"requests": [{
-        "repeatCell": {
-            "range": {
-                "sheetId": sheet.id,
-                "startRowIndex": 0,
-                "startColumnIndex": 0,
-                "endColumnIndex": 8
-            },
-            "cell": {"userEnteredFormat": {}},
-            "fields": "userEnteredFormat"
-        }
-    }]})
 
-    headers = ["cohort_week", "customers",
-               "p1 (d1-28)", "p1 %",
-               "p2 (d29-56)", "p2 %",
-               "p3 (d57-84)", "p3 %"]
-    data_cols = ["cohort_week", "customers",
-                 "p1_count", "p1_pct",
-                 "p2_count", "p2_pct",
-                 "p3_count", "p3_pct"]
+    headers = ["cohort_week", "customers", "p1 (d1-28)", "p1 %", "p2 (d29-56)", "p2 %", "p3 (d57-84)", "p3 %"]
+    data_cols = ["cohort_week", "customers", "p1_count", "p1_pct", "p2_count", "p2_pct", "p3_count", "p3_pct"]
 
     rows = summary[data_cols].values.tolist()
-    # Use RAW so strings stay strings, no date auto-parsing
     sheet.update([headers] + rows, value_input_option="RAW")
+    apply_formatting(spreadsheet, sheet, len(rows))
+
     print(f"  Written {len(rows)} cohort weeks")
     print(f"  Updated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}")
 
