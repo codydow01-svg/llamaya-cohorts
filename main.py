@@ -2,6 +2,7 @@
 """
 Llamaya Cohort Analysis - with Google Sheets formatting
 Weekly cohorts, 3x28-day recharge windows, green gradient on % columns.
+Customer identifier: MSISDN (phone/SIM number).
 """
 
 import os
@@ -27,12 +28,15 @@ WINDOWS = [
     ("p3", 57,  84),
 ]
 
-# Column indices (0-based).
-COL_DATE     = 1   # B — order date
-COL_EMAIL    = 2   # C — customer email
-COL_STRIPE   = 8   # I — stripe_id
-COL_RECHARGE = 25  # Z — recharge status
-COL_OPERATOR = 9   # J — operator
+# Column indices (0-based), sheet Main_Sheet-2-1
+# A=0: order_id, B=1: Paid, C=2: Date, H=7: Name, I=8: Origin
+# J=9: Operator, U=20: Transaction id, V=21: Payment id
+# Y=24: MSISDN, Z=25: Recharge
+COL_DATE        = 2   # C — order date
+COL_MSISDN      = 24  # Y — MSISDN (unique customer identifier)
+COL_TRANSACTION = 20  # U — Transaction id (non-empty = paid order)
+COL_RECHARGE    = 25  # Z — recharge status ("yes" = recharge, "" = first purchase)
+COL_OPERATOR    = 9   # J — operator
 
 
 def get_client():
@@ -51,40 +55,25 @@ def read_orders(client):
     rows = sheet.get_all_values()
     if len(rows) < 2:
         raise ValueError("Orders sheet is empty")
-
-    headers = rows[0]
-    print(f"  Total columns: {len(headers)}")
-    print("  Headers (index: name):")
-    for i, h in enumerate(headers):
-        if h:
-            print(f"    {i}: {h}")
-
-    print(f"\n  Key columns used:")
-    print(f"    COL_DATE     [{COL_DATE}]  = '{headers[COL_DATE] if COL_DATE < len(headers) else 'OUT OF RANGE'}'")
-    print(f"    COL_EMAIL    [{COL_EMAIL}]  = '{headers[COL_EMAIL] if COL_EMAIL < len(headers) else 'OUT OF RANGE'}'")
-    print(f"    COL_STRIPE   [{COL_STRIPE}]  = '{headers[COL_STRIPE] if COL_STRIPE < len(headers) else 'OUT OF RANGE'}'")
-    print(f"    COL_RECHARGE [{COL_RECHARGE}] = '{headers[COL_RECHARGE] if COL_RECHARGE < len(headers) else 'OUT OF RANGE'}'")
-    print(f"    COL_OPERATOR [{COL_OPERATOR}]  = '{headers[COL_OPERATOR] if COL_OPERATOR < len(headers) else 'OUT OF RANGE'}'")
-
-    df = pd.DataFrame(rows[1:], columns=headers)
-    print(f"\n  Total rows: {len(df)}")
+    df = pd.DataFrame(rows[1:], columns=rows[0])
+    print(f"  Total rows: {len(df)}")
     return df
 
 
 def compute_cohorts(df):
     cols = df.columns
-    col_date     = cols[COL_DATE]
-    col_email    = cols[COL_EMAIL]
-    col_stripe   = cols[COL_STRIPE]
-    col_recharge = cols[COL_RECHARGE]
-    col_operator = cols[COL_OPERATOR]
+    col_date        = cols[COL_DATE]
+    col_msisdn      = cols[COL_MSISDN]
+    col_transaction = cols[COL_TRANSACTION]
+    col_recharge    = cols[COL_RECHARGE]
+    col_operator    = cols[COL_OPERATOR]
 
     mask = (
         (df[col_operator].str.strip() == "Llamaya") &
-        df[col_stripe].notna() & (df[col_stripe] != "")
+        df[col_transaction].notna() & (df[col_transaction].str.strip() != "")
     )
     llamaya = df[mask].copy()
-    print(f"  Llamaya rows with stripe_id: {len(llamaya)}")
+    print(f"  Llamaya rows with transaction id: {len(llamaya)}")
 
     llamaya[col_date] = pd.to_datetime(llamaya[col_date], dayfirst=True, errors="coerce")
     llamaya = llamaya.dropna(subset=[col_date])
@@ -94,20 +83,20 @@ def compute_cohorts(df):
     print(f"  First purchases: {len(first)}, Recharges: {len(recharged)}")
 
     cohorts = (
-        first.groupby(col_email)[col_date]
+        first.groupby(col_msisdn)[col_date]
         .min()
         .reset_index()
-        .rename(columns={col_email: "email", col_date: "cohort_date"})
+        .rename(columns={col_msisdn: "msisdn", col_date: "cohort_date"})
         .sort_values("cohort_date")
         .reset_index(drop=True)
     )
-    print(f"  Unique customers: {len(cohorts)}")
+    print(f"  Unique MSISDNs: {len(cohorts)}")
 
-    recharge_map = recharged.groupby(col_email)[col_date].apply(list).to_dict()
+    recharge_map = recharged.groupby(col_msisdn)[col_date].apply(list).to_dict()
 
     for col_name, days_from, days_to in WINDOWS:
         def flag(row, d0=days_from, d1=days_to):
-            dates = recharge_map.get(row["email"], [])
+            dates = recharge_map.get(row["msisdn"], [])
             lo = row["cohort_date"] + pd.Timedelta(days=d0)
             hi = row["cohort_date"] + pd.Timedelta(days=d1)
             return 1 if any(lo <= d <= hi for d in dates) else 0
