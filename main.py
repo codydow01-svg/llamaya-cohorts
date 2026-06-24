@@ -74,13 +74,12 @@ def compute_cohorts(df):
     )
     llamaya = df[mask].copy()
     print(f"  Llamaya rows with transaction id: {len(llamaya)}")
-    print(f"  Recharge col unique values: {llamaya[col_recharge].str.strip().unique().tolist()}")
 
     llamaya[col_date] = pd.to_datetime(llamaya[col_date], dayfirst=True, errors="coerce")
     llamaya = llamaya.dropna(subset=[col_date])
 
     first     = llamaya[llamaya[col_recharge].str.strip() == ""].copy()
-    recharged = llamaya[llamaya[col_recharge].str.strip() == "yes"].copy()
+    recharged = llamaya[llamaya[col_recharge].str.strip().str.lower() == "yes"].copy()
     print(f"  First purchases: {len(first)}, Recharges: {len(recharged)}")
 
     cohorts = (
