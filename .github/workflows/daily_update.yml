@@ -1,26 +1,21 @@
-name: Update Llamaya Cohorts
+name: Llamaya Cohort Update
 
 on:
   schedule:
-    - cron: '0 3 * * *'
+    - cron: '45 9 * * *'
   workflow_dispatch:
 
 jobs:
-  update-cohorts:
+  update:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-
       - name: Install dependencies
         run: pip install -r requirements.txt
-
-      - name: Run cohort analysis
+      - name: Run cohort update
         env:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
         run: python main.py
