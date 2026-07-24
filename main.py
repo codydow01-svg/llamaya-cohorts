@@ -1,193 +1,200 @@
 #!/usr/bin/env python3
 """
-Llamaya Cohort Analysis - with Google Sheets formatting
-Weekly cohorts, 3x28-day recharge windows, green gradient on % columns.
-Customer identifier: MSISDN (phone/SIM number).
+Llamaya Cohort Analysis
+=======================
+Reads all orders from Main_Sheet-2-1, filters Operator = "Llamaya",
+computes weekly retention cohorts using MSISDN as the customer identifier,
+then writes results to Cohort_Llamaya tab.
+
+Cohort windows (relative to each customer first purchase date):
+  p1  d1-28   p2  d29-56   p3  d57-84
 """
 
 import os
 import json
+import datetime
+from collections import defaultdict
+
 import gspread
-import pandas as pd
-from datetime import datetime
 from google.oauth2.service_account import Credentials
+from googleapiclient.discovery import build
 
-ORDERS_SPREADSHEET_ID = "1eJau3HSsP_qYA7Sy2C9AF17uA47B3QlrnDmzDM59yrg"
-ORDERS_SHEET_NAME     = "Main_Sheet-2-1"
-COHORT_SPREADSHEET_ID = "1sM00OKAvedi4GlNav3wtN-efEBl2fxUHUhebkr37xcA"
-COHORT_SHEET_NAME     = "Cohort_Llamaya"
 
-SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive.readonly",
+ORDERS_SHEET_ID = "1eJau3HSsP_qYA7Sy2C9AF17uA47B3QlrnDmzDM59yrg"
+ORDERS_TAB      = "Main_Sheet-2-1"
+COHORT_SHEET_ID = "1sM00OKAvedi4GlNav3wtN-efEBl2fxUHUhebkr37xcA"
+COHORT_TAB      = "Cohort_Llamaya"
+
+COL_PAID     = 1
+COL_OPERATOR = 9
+COL_MSISDN   = 24
+
+SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
+
+HEADER = [
+    "cohort_week", "customers",
+    "p1 (d1-28)", "p1 %",
+    "p2 (d29-56)", "p2 %",
+    "p3 (d57-84)", "p3 %",
 ]
 
-WINDOWS = [
-    ("p1",  1,  28),
-    ("p2", 29,  56),
-    ("p3", 57,  84),
-]
-
-# Column indices (0-based), sheet Main_Sheet-2-1
-# A=0: order_id, B=1: Paid, C=2: Date, H=7: Name, I=8: Origin
-# J=9: Operator, U=20: Transaction id, V=21: Payment id
-# Y=24: MSISDN, Z=25: Recharge
-COL_DATE        = 2   # C — order date
-COL_MSISDN      = 24  # Y — MSISDN (unique customer identifier)
-COL_TRANSACTION = 20  # U — Transaction id (non-empty = paid order)
-COL_RECHARGE    = 25  # Z — recharge status ("yes" = recharge, "" = first purchase)
-COL_OPERATOR    = 9   # J — operator
+GREEN = {"red": 0.204, "green": 0.659, "blue": 0.325}
+WHITE = {"red": 1.0, "green": 1.0, "blue": 1.0}
 
 
-def get_client():
-    creds_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
-    if not creds_json:
-        raise ValueError("GOOGLE_SERVICE_ACCOUNT_JSON environment variable not set")
-    creds = Credentials.from_service_account_info(json.loads(creds_json), scopes=SCOPES)
-    client = gspread.authorize(creds)
-    print(f"  Service account: {creds.service_account_email}")
-    return client
+def get_creds():
+    info = json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"])
+    return Credentials.from_service_account_info(info, scopes=SCOPES)
 
 
-def read_orders(client):
-    print("Reading orders...")
-    sheet = client.open_by_key(ORDERS_SPREADSHEET_ID).worksheet(ORDERS_SHEET_NAME)
-    rows = sheet.get_all_values()
-    if len(rows) < 2:
-        raise ValueError("Orders sheet is empty")
-    df = pd.DataFrame(rows[1:], columns=rows[0])
-    print(f"  Total rows: {len(df)}")
-    return df
+def week_monday(d):
+    return d - datetime.timedelta(days=d.weekday())
 
 
-def compute_cohorts(df):
-    cols = df.columns
-    col_date        = cols[COL_DATE]
-    col_msisdn      = cols[COL_MSISDN]
-    col_transaction = cols[COL_TRANSACTION]
-    col_recharge    = cols[COL_RECHARGE]
-    col_operator    = cols[COL_OPERATOR]
-
-    mask = (
-        (df[col_operator].str.strip() == "Llamaya") &
-        df[col_transaction].notna() & (df[col_transaction].str.strip() != "")
-    )
-    llamaya = df[mask].copy()
-    print(f"  Llamaya rows with transaction id: {len(llamaya)}")
-
-    llamaya[col_date] = pd.to_datetime(llamaya[col_date], dayfirst=True, errors="coerce")
-    llamaya = llamaya.dropna(subset=[col_date])
-
-    first     = llamaya[llamaya[col_recharge].str.strip() == ""].copy()
-    recharged = llamaya[llamaya[col_recharge].str.strip().str.lower() == "yes"].copy()
-    print(f"  First purchases: {len(first)}, Recharges: {len(recharged)}")
-
-    cohorts = (
-        first.groupby(col_msisdn)[col_date]
-        .min()
-        .reset_index()
-        .rename(columns={col_msisdn: "msisdn", col_date: "cohort_date"})
-        .sort_values("cohort_date")
-        .reset_index(drop=True)
-    )
-    print(f"  Unique MSISDNs: {len(cohorts)}")
-
-    recharge_map = recharged.groupby(col_msisdn)[col_date].apply(list).to_dict()
-
-    for col_name, days_from, days_to in WINDOWS:
-        def flag(row, d0=days_from, d1=days_to):
-            dates = recharge_map.get(row["msisdn"], [])
-            lo = row["cohort_date"] + pd.Timedelta(days=d0)
-            hi = row["cohort_date"] + pd.Timedelta(days=d1)
-            return 1 if any(lo <= d <= hi for d in dates) else 0
-        cohorts[col_name] = cohorts.apply(flag, axis=1)
-
-    cohort_day = cohorts["cohort_date"].dt.normalize()
-    cohorts["cohort_week_start"] = cohort_day - pd.to_timedelta(
-        cohort_day.dt.dayofweek, unit="D"
-    )
-
-    today = pd.Timestamp.now().normalize()
-
-    records = []
-    for week_start, group in cohorts.groupby("cohort_week_start"):
-        total = len(group)
-        row = {
-            "cohort_week": week_start.strftime("%d.%m") + " - " + (week_start + pd.Timedelta(days=6)).strftime("%d.%m.%Y"),
-            "customers":   total,
-        }
-        for col_name, days_from, days_to in WINDOWS:
-            days_since = (today - week_start).days
-            if days_since < days_from:
-                row[f"{col_name}_count"] = "рано"
-                row[f"{col_name}_pct"]   = ""
-            else:
-                count = int(group[col_name].sum())
-                row[f"{col_name}_count"] = count
-                row[f"{col_name}_pct"]   = round(count / total * 100, 1)
-        records.append(row)
-
-    summary = pd.DataFrame(records)
-    print(f"  Cohort weeks: {len(summary)}")
-    return summary
-
-
-def apply_formatting(spreadsheet, sheet, num_rows):
-    sid = sheet.id
-    end_row = num_rows + 1
-    requests = []
-
-    requests.append({"repeatCell": {"range": {"sheetId": sid}, "cell": {"userEnteredFormat": {}}, "fields": "userEnteredFormat"}})
-
-    requests.append({"repeatCell": {"range": {"sheetId": sid, "startRowIndex": 0, "endRowIndex": 1, "startColumnIndex": 0, "endColumnIndex": 8}, "cell": {"userEnteredFormat": {"textFormat": {"bold": True, "fontSize": 10}, "backgroundColor": {"red": 0.851, "green": 0.851, "blue": 0.851}, "verticalAlignment": "MIDDLE"}}, "fields": "userEnteredFormat(textFormat,backgroundColor,verticalAlignment)"}})
-
-    requests.append({"updateSheetProperties": {"properties": {"sheetId": sid, "gridProperties": {"frozenRowCount": 1}}, "fields": "gridProperties.frozenRowCount"}})
-
-    requests.append({"repeatCell": {"range": {"sheetId": sid, "startRowIndex": 1, "endRowIndex": end_row, "startColumnIndex": 1, "endColumnIndex": 8}, "cell": {"userEnteredFormat": {"horizontalAlignment": "CENTER"}}, "fields": "userEnteredFormat.horizontalAlignment"}})
-
-    for col in [3, 5, 7]:
-        requests.append({"addConditionalFormatRule": {"rule": {"ranges": [{"sheetId": sid, "startRowIndex": 1, "endRowIndex": end_row, "startColumnIndex": col, "endColumnIndex": col + 1}], "gradientRule": {"minpoint": {"colorStyle": {"rgbColor": {"red": 1.0, "green": 1.0, "blue": 1.0}}, "type": "NUMBER", "value": "0"}, "maxpoint": {"colorStyle": {"rgbColor": {"red": 0.204, "green": 0.659, "blue": 0.325}}, "type": "NUMBER", "value": "30"}}}, "index": 0}})
-
-    for col_start, col_end in [(2, 4), (4, 6), (6, 8)]:
-        requests.append({"addConditionalFormatRule": {"rule": {"ranges": [{"sheetId": sid, "startRowIndex": 1, "endRowIndex": end_row, "startColumnIndex": col_start, "endColumnIndex": col_end}], "booleanRule": {"condition": {"type": "TEXT_EQ", "values": [{"userEnteredValue": "рано"}]}, "format": {"backgroundColor": {"red": 0.941, "green": 0.941, "blue": 0.941}, "textFormat": {"foregroundColor": {"red": 0.6, "green": 0.6, "blue": 0.6}, "italic": True}}}}, "index": 0}})
-
-    for i, w in enumerate([130, 90, 100, 80, 110, 80, 110, 80]):
-        requests.append({"updateDimensionProperties": {"range": {"sheetId": sid, "dimension": "COLUMNS", "startIndex": i, "endIndex": i + 1}, "properties": {"pixelSize": w}, "fields": "pixelSize"}})
-
-    requests.append({"updateDimensionProperties": {"range": {"sheetId": sid, "dimension": "ROWS", "startIndex": 0, "endIndex": 1}, "properties": {"pixelSize": 32}, "fields": "pixelSize"}})
-
-    spreadsheet.batch_update({"requests": requests})
-    print("  Formatting applied")
-
-
-def write_cohorts(client, summary):
-    print("\nWriting to Cohort_Llamaya...")
-    spreadsheet = client.open_by_key(COHORT_SPREADSHEET_ID)
+def parse_date(s):
+    if not s:
+        return None
     try:
-        sheet = spreadsheet.worksheet(COHORT_SHEET_NAME)
-    except gspread.WorksheetNotFound:
-        sheet = spreadsheet.add_worksheet(COHORT_SHEET_NAME, rows=500, cols=10)
-        print("  Created new sheet Cohort_Llamaya")
+        return datetime.datetime.strptime(s[:10], "%Y-%m-%d").date()
+    except ValueError:
+        return None
 
-    sheet.clear()
 
-    headers = ["cohort_week", "customers", "p1 (d1-28)", "p1 %", "p2 (d29-56)", "p2 %", "p3 (d57-84)", "p3 %"]
-    data_cols = ["cohort_week", "customers", "p1_count", "p1_pct", "p2_count", "p2_pct", "p3_count", "p3_pct"]
+def build_cohorts(rows):
+    msisdn_dates = defaultdict(list)
+    for row in rows:
+        if len(row) <= COL_MSISDN:
+            continue
+        if (row[COL_OPERATOR] or "").strip() != "Llamaya":
+            continue
+        msisdn = (row[COL_MSISDN] or "").strip()
+        if not msisdn:
+            continue
+        d = parse_date(row[COL_PAID])
+        if d:
+            msisdn_dates[msisdn].append(d)
 
-    rows = summary[data_cols].values.tolist()
-    sheet.update([headers] + rows, value_input_option="RAW")
-    apply_formatting(spreadsheet, sheet, len(rows))
+    cohort_customers = defaultdict(set)
+    cohort_p1 = defaultdict(set)
+    cohort_p2 = defaultdict(set)
+    cohort_p3 = defaultdict(set)
 
-    print(f"  Written {len(rows)} cohort weeks")
-    print(f"  Updated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}")
+    for msisdn, dates in msisdn_dates.items():
+        first = min(dates)
+        week = week_monday(first)
+        cohort_customers[week].add(msisdn)
+        for d in dates:
+            delta = (d - first).days
+            if  1 <= delta <= 28: cohort_p1[week].add(msisdn)
+            if 29 <= delta <= 56: cohort_p2[week].add(msisdn)
+            if 57 <= delta <= 84: cohort_p3[week].add(msisdn)
+
+    result = []
+    for week in sorted(cohort_customers):
+        n  = len(cohort_customers[week])
+        p1 = len(cohort_p1[week])
+        p2 = len(cohort_p2[week])
+        p3 = len(cohort_p3[week])
+        result.append({
+            "cohort_week": week.strftime("%Y-%m-%d"),
+            "customers": n,
+            "p1": p1, "p1_pct": p1 / n if n else 0,
+            "p2": p2, "p2_pct": p2 / n if n else 0,
+            "p3": p3, "p3_pct": p3 / n if n else 0,
+        })
+    return result
+
+
+def cohort_to_row(c):
+    return [c["cohort_week"], c["customers"],
+            c["p1"], c["p1_pct"],
+            c["p2"], c["p2_pct"],
+            c["p3"], c["p3_pct"]]
+
+
+def apply_formatting(service, spreadsheet_id, sheet_id, n_data):
+    meta = service.spreadsheets().get(
+        spreadsheetId=spreadsheet_id,
+        fields="sheets(properties.sheetId,conditionalFormats)",
+    ).execute()
+    n_rules = 0
+    for s in meta.get("sheets", []):
+        if s["properties"]["sheetId"] == sheet_id:
+            n_rules = len(s.get("conditionalFormats", []))
+            break
+
+    requests = [{"deleteConditionalFormatRule": {"sheetId": sheet_id, "index": i}}
+                for i in range(n_rules - 1, -1, -1)]
+
+    end_row = n_data + 1
+    requests.append({
+        "repeatCell": {
+            "range": {"sheetId": sheet_id, "startRowIndex": 0, "endRowIndex": 1},
+            "cell": {"userEnteredFormat": {
+                "textFormat": {"bold": True},
+                "backgroundColor": {"red": 0.851, "green": 0.851, "blue": 0.851},
+            }},
+            "fields": "userEnteredFormat(textFormat.bold,backgroundColor)",
+        }
+    })
+    for col in [3, 5, 7]:
+        requests.append({
+            "repeatCell": {
+                "range": {"sheetId": sheet_id,
+                          "startRowIndex": 1, "endRowIndex": end_row,
+                          "startColumnIndex": col, "endColumnIndex": col + 1},
+                "cell": {"userEnteredFormat": {
+                    "numberFormat": {"type": "PERCENT", "pattern": "0.0%"}
+                }},
+                "fields": "userEnteredFormat.numberFormat",
+            }
+        })
+        requests.append({
+            "addConditionalFormatRule": {
+                "rule": {
+                    "ranges": [{"sheetId": sheet_id,
+                                "startRowIndex": 1, "endRowIndex": end_row,
+                                "startColumnIndex": col, "endColumnIndex": col + 1}],
+                    "gradientRule": {
+                        "minpoint": {"color": WHITE, "type": "MIN"},
+                        "maxpoint": {"color": GREEN, "type": "MAX"},
+                    },
+                },
+                "index": 0,
+            }
+        })
+    if requests:
+        service.spreadsheets().batchUpdate(
+            spreadsheetId=spreadsheet_id, body={"requests": requests}).execute()
 
 
 def main():
-    client = get_client()
-    df = read_orders(client)
-    summary = compute_cohorts(df)
-    write_cohorts(client, summary)
-    print("\nDone!")
+    creds   = get_creds()
+    gc      = gspread.authorize(creds)
+    service = build("sheets", "v4", credentials=creds)
+
+    print("Reading orders...")
+    orders_ws = gc.open_by_key(ORDERS_SHEET_ID).worksheet(ORDERS_TAB)
+    data_rows = orders_ws.get_all_values()[1:]
+    print(f"  {len(data_rows)} rows")
+
+    cohorts = build_cohorts(data_rows)
+    print(f"  {len(cohorts)} cohort weeks")
+    for c in cohorts[-5:]:
+        print(f"  {c['cohort_week']}: {c['customers']} customers "
+              f"p1={c['p1_pct']:.1%} p2={c['p2_pct']:.1%} p3={c['p3_pct']:.1%}")
+
+    print("Writing Cohort_Llamaya...")
+    cohort_wb = gc.open_by_key(COHORT_SHEET_ID)
+    cohort_ws = cohort_wb.worksheet(COHORT_TAB)
+    sheet_rows = [HEADER] + [cohort_to_row(c) for c in cohorts]
+    cohort_ws.clear()
+    cohort_ws.update("A1", sheet_rows, value_input_option="USER_ENTERED")
+    print(f"  {len(sheet_rows)} rows written")
+
+    print("Formatting...")
+    apply_formatting(service, COHORT_SHEET_ID, cohort_ws.id, len(cohorts))
+    print("Done!")
 
 
 if __name__ == "__main__":
