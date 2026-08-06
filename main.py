@@ -7,7 +7,10 @@ computes weekly retention cohorts using MSISDN as the customer identifier,
 then writes results to Cohort_Llamaya tab.
 
 Cohort windows (relative to each customer first purchase date):
-  p1  d1-28   p2  d29-56   p3  d57-84
+p1 d1-28 p2 d29-56 p3 d57-84
+
+p1/p2/p3 counts only customers who have a Recharge="yes" transaction
+in the respective window (column Z of the orders sheet).
 """
 
 import os
@@ -19,15 +22,15 @@ import gspread
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 
-
 ORDERS_SHEET_ID = "1eJau3HSsP_qYA7Sy2C9AF17uA47B3QlrnDmzDM59yrg"
-ORDERS_TAB      = "Main_Sheet-2-1"
+ORDERS_TAB = "Main_Sheet-2-1"
 COHORT_SHEET_ID = "1sM00OKAvedi4GlNav3wtN-efEBl2fxUHUhebkr37xcA"
-COHORT_TAB      = "Cohort_Llamaya"
+COHORT_TAB = "Cohort_Llamaya"
 
-COL_PAID     = 1
-COL_OPERATOR = 9
-COL_MSISDN   = 24
+COL_PAID     = 1   # column B: "Paid"
+COL_OPERATOR = 9   # column J: "Operator"
+COL_MSISDN   = 24  # column Y: "MSISDN"
+COL_RECHARGE = 25  # column Z: "Recharge" - "yes" means customer recharged
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
@@ -41,15 +44,12 @@ HEADER = [
 GREEN = {"red": 0.204, "green": 0.659, "blue": 0.325}
 WHITE = {"red": 1.0, "green": 1.0, "blue": 1.0}
 
-
 def get_creds():
     info = json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"])
     return Credentials.from_service_account_info(info, scopes=SCOPES)
 
-
 def week_monday(d):
     return d - datetime.timedelta(days=d.weekday())
-
 
 def parse_date(s):
     if not s:
@@ -59,9 +59,8 @@ def parse_date(s):
     except ValueError:
         return None
 
-
 def build_cohorts(rows):
-    msisdn_dates = defaultdict(list)
+    msisdn_entries = defaultdict(list)  # MSISDN -> list of (date, is_recharge)
     for row in rows:
         if len(row) <= COL_MSISDN:
             continue
@@ -71,19 +70,24 @@ def build_cohorts(rows):
         if not msisdn:
             continue
         d = parse_date(row[COL_PAID])
-        if d:
-            msisdn_dates[msisdn].append(d)
+        if not d:
+            continue
+        is_recharge = (len(row) > COL_RECHARGE and
+                       (row[COL_RECHARGE] or "").strip().lower() == "yes")
+        msisdn_entries[msisdn].append((d, is_recharge))
 
     cohort_customers = defaultdict(set)
     cohort_p1 = defaultdict(set)
     cohort_p2 = defaultdict(set)
     cohort_p3 = defaultdict(set)
 
-    for msisdn, dates in msisdn_dates.items():
-        first = min(dates)
+    for msisdn, entries in msisdn_entries.items():
+        first = min(d for d, _ in entries)
         week = week_monday(first)
         cohort_customers[week].add(msisdn)
-        for d in dates:
+        for d, is_recharge in entries:
+            if not is_recharge:
+                continue
             delta = (d - first).days
             if  1 <= delta <= 28: cohort_p1[week].add(msisdn)
             if 29 <= delta <= 56: cohort_p2[week].add(msisdn)
@@ -91,7 +95,7 @@ def build_cohorts(rows):
 
     result = []
     for week in sorted(cohort_customers):
-        n  = len(cohort_customers[week])
+        n = len(cohort_customers[week])
         p1 = len(cohort_p1[week])
         p2 = len(cohort_p2[week])
         p3 = len(cohort_p3[week])
@@ -104,13 +108,11 @@ def build_cohorts(rows):
         })
     return result
 
-
 def cohort_to_row(c):
     return [c["cohort_week"], c["customers"],
             c["p1"], c["p1_pct"],
             c["p2"], c["p2_pct"],
             c["p3"], c["p3_pct"]]
-
 
 def apply_formatting(service, spreadsheet_id, sheet_id, n_data):
     meta = service.spreadsheets().get(
@@ -167,10 +169,9 @@ def apply_formatting(service, spreadsheet_id, sheet_id, n_data):
         service.spreadsheets().batchUpdate(
             spreadsheetId=spreadsheet_id, body={"requests": requests}).execute()
 
-
 def main():
-    creds   = get_creds()
-    gc      = gspread.authorize(creds)
+    creds = get_creds()
+    gc = gspread.authorize(creds)
     service = build("sheets", "v4", credentials=creds)
 
     print("Reading orders...")
@@ -195,7 +196,6 @@ def main():
     print("Formatting...")
     apply_formatting(service, COHORT_SHEET_ID, cohort_ws.id, len(cohorts))
     print("Done!")
-
 
 if __name__ == "__main__":
     main()
