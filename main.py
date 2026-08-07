@@ -39,6 +39,7 @@ HEADER = [
     "p1 (d1-28)", "p1 %",
     "p2 (d29-56)", "p2 %",
     "p3 (d57-84)", "p3 %",
+    "total (ever)", "total %",
 ]
 
 GREEN = {"red": 0.204, "green": 0.659, "blue": 0.325}
@@ -99,12 +100,14 @@ def build_cohorts(rows):
         p1 = len(cohort_p1[week])
         p2 = len(cohort_p2[week])
         p3 = len(cohort_p3[week])
+        total = len(cohort_p1[week] | cohort_p2[week] | cohort_p3[week])
         result.append({
             "cohort_week": week.strftime("%Y-%m-%d"),
             "customers": n,
             "p1": p1, "p1_pct": p1 / n if n else 0,
             "p2": p2, "p2_pct": p2 / n if n else 0,
             "p3": p3, "p3_pct": p3 / n if n else 0,
+            "total": total, "total_pct": total / n if n else 0,
         })
     return result
 
@@ -112,7 +115,8 @@ def cohort_to_row(c):
     return [c["cohort_week"], c["customers"],
             c["p1"], c["p1_pct"],
             c["p2"], c["p2_pct"],
-            c["p3"], c["p3_pct"]]
+            c["p3"], c["p3_pct"],
+            c["total"], c["total_pct"]]
 
 def apply_formatting(service, spreadsheet_id, sheet_id, n_data):
     meta = service.spreadsheets().get(
@@ -139,7 +143,7 @@ def apply_formatting(service, spreadsheet_id, sheet_id, n_data):
             "fields": "userEnteredFormat(textFormat.bold,backgroundColor)",
         }
     })
-    for col in [3, 5, 7]:
+    for col in [3, 5, 7, 9]:
         requests.append({
             "repeatCell": {
                 "range": {"sheetId": sheet_id,
@@ -183,7 +187,7 @@ def main():
     print(f"  {len(cohorts)} cohort weeks")
     for c in cohorts[-5:]:
         print(f"  {c['cohort_week']}: {c['customers']} customers "
-              f"p1={c['p1_pct']:.1%} p2={c['p2_pct']:.1%} p3={c['p3_pct']:.1%}")
+              f"p1={c['p1_pct']:.1%} p2={c['p2_pct']:.1%} p3={c['p3_pct']:.1%} total={c['total_pct']:.1%}")
 
     print("Writing Cohort_Llamaya...")
     cohort_wb = gc.open_by_key(COHORT_SHEET_ID)
